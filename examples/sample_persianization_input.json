@@ -1,0 +1,98 @@
+[
+  {
+    "id": "rec_001",
+    "text": "این یک متن کاملاً فارسی بومی است که نیازی به فراخوانی مترجم ندارد.",
+    "language": "fa",
+    "context": null,
+    "source": "manual_test",
+    "source_label": 0,
+    "parent_id": null,
+    "group_id": "group_001",
+    "split": "train",
+    "metadata": {"topic": "general"}
+  },
+  {
+    "id": "rec_002",
+    "text": "خیلی هم عالی بود، دستت درد نکنه واقعاً دمت گرم!",
+    "language": "fa",
+    "context": null,
+    "source": "twitter",
+    "source_label": 0,
+    "parent_id": null,
+    "group_id": "group_002",
+    "split": "train",
+    "metadata": {"register": "colloquial"}
+  },
+  {
+    "id": "rec_003",
+    "text": "Get out of here, you absolute idiot!",
+    "language": "en",
+    "context": null,
+    "source": "reddit",
+    "source_label": 1,
+    "parent_id": null,
+    "group_id": "group_003",
+    "split": "train",
+    "metadata": {"type": "insult"}
+  },
+  {
+    "id": "rec_004",
+    "text": "The conference will start tomorrow at 9 AM in the main auditorium.",
+    "language": "en",
+    "context": null,
+    "source": "academic",
+    "source_label": 0,
+    "parent_id": null,
+    "group_id": "group_004",
+    "split": "dev",
+    "metadata": {"domain": "announcement"}
+  },
+  {
+    "id": "rec_005",
+    "text": "I really cannot understand why the system failed so badly.",
+    "language": "en",
+    "context": null,
+    "source": "tech_forum",
+    "source_label": 0,
+    "parent_id": null,
+    "group_id": "group_005",
+    "split": "test",
+    "metadata": {"has_cannot": true}
+  },
+  {
+    "id": "rec_006",
+    "text": "You must be kidding me, that is ridiculous!",
+    "language": "en",
+    "context": "Discussing the budget proposal",
+    "source": "forums",
+    "source_label": 0,
+    "parent_id": null,
+    "group_id": "group_006",
+    "split": "train",
+    "metadata": {"has_context": true}
+  },
+  {
+    "id": "rec_007",
+    "text": "من با نظر شما درباره این پروژه موافقم.",
+    "language": "fa",
+    "context": "Discussion regarding budget cuts",
+    "source": "internal_review",
+    "source_label": 0,
+    "parent_id": null,
+    "group_id": "group_007",
+    "split": "train",
+    "metadata": {"context_lang": "en"}
+  },
+  {
+    "id": "rec_008",
+    "text": "salam dadash halet chetore emrooz nemiam",
+    "language": null,
+    "context": null,
+    "source": "chat",
+    "source_label": 0,
+    "parent_id": null,
+    "group_id": "group_008",
+    "split": "train",
+    "metadata": {"type": "fingilish"}
+  }
+]

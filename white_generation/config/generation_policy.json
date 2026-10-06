@@ -1,0 +1,30 @@
+{
+  "policy_name": "white_generation_policy_v1",
+  "active_recipes": [
+    "minimal_disambiguation",
+    "criticism",
+    "hard_negative",
+    "ordinary",
+    "educational",
+    "reported_condemnation"
+  ],
+  "variants_per_recipe": 1,
+  "min_persian_quality_score": 4,
+  "consensus_rules": {
+    "total_judges": 4,
+    "candidate0_threshold": 3,
+    "candidate1_threshold": 3,
+    "auto_accept_requires_unanimous": true,
+    "hold_split_3_1_for_review": true,
+    "sensitive_recipes_requiring_review": [
+      "educational",
+      "reported_condemnation"
+    ]
+  },
+  "seed_eligibility": {
+    "allow_label1_seeds": true,
+    "allow_null_label_seeds": true,
+    "allow_label0_seeds": true
+  },
+  "description": "Policy for independent generation of high-quality clean Persian texts evaluated by a 4-judge blind panel."
+}

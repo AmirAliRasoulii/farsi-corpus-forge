@@ -1,0 +1,9 @@
+id,text,language,context,source,source_label,parent_id,group_id,split,metadata
+rec_001,"این یک متن کاملاً فارسی بومی است که نیازی به فراخوانی مترجم ندارد.",fa,,"manual_test",0,,group_001,train,"{""topic"": ""general""}"
+rec_002,"خیلی هم عالی بود، دستت درد نکنه واقعاً دمت گرم!",fa,,"twitter",0,,group_002,train,"{""register"": ""colloquial""}"
+rec_003,"Get out of here, you absolute idiot!",en,,"reddit",1,,group_003,train,"{""type"": ""insult""}"
+rec_004,"The conference will start tomorrow at 9 AM in the main auditorium.",en,,"academic",0,,group_004,dev,"{""domain"": ""announcement""}"
+rec_005,"I really cannot understand why the system failed so badly.",en,,"tech_forum",0,,group_005,test,"{""has_cannot"": true}"
+rec_006,"You must be kidding me, that is ridiculous!",en,"Discussing the budget proposal",forums,0,,group_006,train,"{""has_context"": true}"
+rec_007,"من با نظر شما درباره این پروژه موافقم.",fa,"Discussion regarding budget cuts",internal_review,0,,group_007,train,"{""context_lang"": ""en""}"
+rec_008,"salam dadash halet chetore emrooz nemiam",,,"chat",0,,group_008,train,"{""type"": ""fingilish""}"

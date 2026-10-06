@@ -1,0 +1,284 @@
+"""
+SQLite persistent storage and checkpointing for the Persianization pipeline.
+Provides crash-resilience, attempt auditing, response caching, and atomic state updates.
+"""
+import os
+import json
+import sqlite3
+import threading
+from typing import Dict, Any, List, Optional, Set
+from datetime import datetime, timezone
+
+
+class PersianizationStorage:
+    """Thread-safe SQLite storage for Persianization records and audit trails."""
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+        self._local = threading.local()
+        self._init_db()
+
+    def _get_connection(self) -> sqlite3.Connection:
+        if not hasattr(self._local, "conn") or self._local.conn is None:
+            self._local.conn = sqlite3.connect(self.db_path, timeout=60.0)
+            self._local.conn.row_factory = sqlite3.Row
+            # Enable WAL mode for concurrent read/write performance
+            self._local.conn.execute("PRAGMA journal_mode=WAL;")
+            self._local.conn.execute("PRAGMA synchronous=NORMAL;")
+        return self._local.conn
+
+    def _init_db(self) -> None:
+        conn = self._get_connection()
+        with conn:
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS records (
+                id TEXT PRIMARY KEY,
+                raw_text TEXT NOT NULL,
+                raw_context TEXT,
+                original_language TEXT,
+                origin TEXT NOT NULL,
+                translation_status TEXT NOT NULL,
+                quality_status TEXT NOT NULL,
+                offense_label TEXT,
+                annotation_status TEXT NOT NULL DEFAULT 'not_annotated',
+                final_persian_text TEXT,
+                final_persian_context TEXT,
+                selected_model TEXT,
+                quality_scores_json TEXT,
+                quality_flags_json TEXT,
+                reason TEXT,
+                source TEXT,
+                source_label TEXT,
+                parent_id TEXT,
+                group_id TEXT,
+                split TEXT,
+                metadata_json TEXT,
+                human_decision TEXT,
+                human_edited_text TEXT,
+                human_notes TEXT,
+                reviewer_name TEXT,
+                updated_at_utc TEXT NOT NULL
+            );
+            """)
+
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                record_id TEXT NOT NULL,
+                step TEXT NOT NULL,
+                model TEXT NOT NULL,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                total_tokens INTEGER,
+                latency_sec REAL,
+                raw_completion TEXT,
+                parsed_json TEXT,
+                status TEXT,
+                error_message TEXT,
+                created_at_utc TEXT NOT NULL
+            );
+            """)
+
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS cache (
+                cache_key TEXT PRIMARY KEY,
+                response_json TEXT NOT NULL,
+                created_at_utc TEXT NOT NULL
+            );
+            """)
+
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS run_meta (
+                run_id TEXT PRIMARY KEY,
+                config_json TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                total_records INTEGER,
+                total_calls INTEGER,
+                total_tokens INTEGER
+            );
+            """)
+
+    def get_completed_ids(self) -> Set[str]:
+        """Returns set of record IDs that are already completed and accepted or routed."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM records WHERE quality_status IN ('accepted', 'not_required') OR translation_status IN ('not_required');")
+        return {row["id"] for row in cursor.fetchall()}
+
+    def get_all_saved_ids(self) -> Set[str]:
+        """Returns set of all IDs currently in the database."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM records;")
+        return {row["id"] for row in cursor.fetchall()}
+
+    def save_record(self, record_data: Dict[str, Any]) -> None:
+        """Upserts a record into the database checkpoint."""
+        conn = self._get_connection()
+        now = datetime.now(timezone.utc).isoformat()
+        
+        quality_scores = record_data.get("quality_scores")
+        scores_json = json.dumps(quality_scores, ensure_ascii=False) if quality_scores else None
+
+        quality_flags = record_data.get("quality_flags")
+        flags_json = json.dumps(quality_flags, ensure_ascii=False) if quality_flags else None
+
+        meta = record_data.get("metadata")
+        meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
+
+        src_lbl = record_data.get("source_label")
+        src_lbl_str = json.dumps(src_lbl, ensure_ascii=False) if isinstance(src_lbl, (dict, list)) else (str(src_lbl) if src_lbl is not None else None)
+
+        with conn:
+            conn.execute("""
+            INSERT INTO records (
+                id, raw_text, raw_context, original_language, origin,
+                translation_status, quality_status, offense_label, annotation_status,
+                final_persian_text, final_persian_context, selected_model,
+                quality_scores_json, quality_flags_json, reason,
+                source, source_label, parent_id, group_id, split,
+                metadata_json, human_decision, human_edited_text, human_notes, reviewer_name,
+                updated_at_utc
+            ) VALUES (
+                :id, :raw_text, :raw_context, :original_language, :origin,
+                :translation_status, :quality_status, :offense_label, :annotation_status,
+                :final_persian_text, :final_persian_context, :selected_model,
+                :quality_scores_json, :quality_flags_json, :reason,
+                :source, :source_label, :parent_id, :group_id, :split,
+                :metadata_json, :human_decision, :human_edited_text, :human_notes, :reviewer_name,
+                :updated_at_utc
+            ) ON CONFLICT(id) DO UPDATE SET
+                origin=excluded.origin,
+                translation_status=excluded.translation_status,
+                quality_status=excluded.quality_status,
+                offense_label=excluded.offense_label,
+                annotation_status=excluded.annotation_status,
+                final_persian_text=excluded.final_persian_text,
+                final_persian_context=excluded.final_persian_context,
+                selected_model=excluded.selected_model,
+                quality_scores_json=excluded.quality_scores_json,
+                quality_flags_json=excluded.quality_flags_json,
+                reason=excluded.reason,
+                human_decision=excluded.human_decision,
+                human_edited_text=excluded.human_edited_text,
+                human_notes=excluded.human_notes,
+                reviewer_name=excluded.reviewer_name,
+                updated_at_utc=excluded.updated_at_utc;
+            """, {
+                "id": record_data["id"],
+                "raw_text": record_data["text"],
+                "raw_context": record_data.get("context"),
+                "original_language": record_data.get("language"),
+                "origin": record_data["origin"],
+                "translation_status": record_data.get("translation_status", "not_required"),
+                "quality_status": record_data.get("quality_status", "not_required"),
+                "offense_label": record_data.get("offense_label"),
+                "annotation_status": record_data.get("annotation_status", "not_annotated"),
+                "final_persian_text": record_data.get("final_persian_text"),
+                "final_persian_context": record_data.get("final_persian_context"),
+                "selected_model": record_data.get("selected_model"),
+                "quality_scores_json": scores_json,
+                "quality_flags_json": flags_json,
+                "reason": record_data.get("reason"),
+                "source": record_data.get("source"),
+                "source_label": src_lbl_str,
+                "parent_id": record_data.get("parent_id"),
+                "group_id": record_data.get("group_id"),
+                "split": record_data.get("split"),
+                "metadata_json": meta_json,
+                "human_decision": record_data.get("human_decision"),
+                "human_edited_text": record_data.get("human_edited_text"),
+                "human_notes": record_data.get("human_notes"),
+                "reviewer_name": record_data.get("reviewer_name"),
+                "updated_at_utc": now
+            })
+
+    def record_attempt(
+        self,
+        record_id: str,
+        step: str,
+        model: str,
+        usage: Dict[str, int],
+        latency_sec: float,
+        raw_completion: str,
+        parsed_json: Optional[Dict[str, Any]],
+        status: str,
+        error_message: Optional[str] = None
+    ) -> None:
+        """Logs an API model invocation attempt."""
+        conn = self._get_connection()
+        now = datetime.now(timezone.utc).isoformat()
+        with conn:
+            conn.execute("""
+            INSERT INTO attempts (
+                record_id, step, model, prompt_tokens, completion_tokens, total_tokens,
+                latency_sec, raw_completion, parsed_json, status, error_message, created_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """, (
+                record_id,
+                step,
+                model,
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+                usage.get("total_tokens", 0),
+                latency_sec,
+                raw_completion,
+                json.dumps(parsed_json, ensure_ascii=False) if parsed_json else None,
+                status,
+                error_message,
+                now
+            ))
+
+    def get_cache(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT response_json FROM cache WHERE cache_key = ?;", (cache_key,))
+        row = cursor.fetchone()
+        if row:
+            try:
+                return json.loads(row["response_json"])
+            except Exception:
+                return None
+        return None
+
+    def set_cache(self, cache_key: str, data: Dict[str, Any]) -> None:
+        conn = self._get_connection()
+        now = datetime.now(timezone.utc).isoformat()
+        with conn:
+            conn.execute("""
+            INSERT OR REPLACE INTO cache (cache_key, response_json, created_at_utc)
+            VALUES (?, ?, ?);
+            """, (cache_key, json.dumps(data, ensure_ascii=False), now))
+
+    def fetch_all_records(self) -> List[Dict[str, Any]]:
+        """Retrieves all records as dictionaries."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM records ORDER BY id;")
+        results = []
+        for row in cursor.fetchall():
+            d = dict(row)
+            # Ensure 'text' field is present for downstream consumers (maps to final_persian_text if available, else raw_text)
+            d["text"] = d.get("final_persian_text") or d.get("raw_text")
+            # Parse json fields
+            for k in ("quality_scores_json", "quality_flags_json", "metadata_json"):
+                if d.get(k):
+                    try:
+                        d[k.replace("_json", "")] = json.loads(d[k])
+                    except Exception:
+                        d[k.replace("_json", "")] = None
+            results.append(d)
+        return results
+
+    def fetch_all_attempts(self) -> List[Dict[str, Any]]:
+        """Retrieves all logged attempts."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM attempts ORDER BY id;")
+        return [dict(row) for row in cursor.fetchall()]
+
+    def close(self) -> None:
+        if hasattr(self._local, "conn") and self._local.conn is not None:
+            self._local.conn.close()
+            self._local.conn = None

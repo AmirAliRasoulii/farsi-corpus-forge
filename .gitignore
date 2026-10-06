@@ -1,0 +1,24 @@
+# Environment and credentials (NEVER commit real API keys!)
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Databases and run locks
+*.db
+*.db-wal
+*.db-shm
+.run.lock
+
+# Outputs
+outputs/
+
+# IDE
+.vscode/
+.idea/
