@@ -94,6 +94,21 @@ def mock_llm_handler(
                 "parsed_json": None,
                 "usage": usage
             }
+        elif "[SIMULATE_COVERT_CENSORSHIP]" in user_content:
+            if "gpt-4o-mini" in model:
+                data = {
+                    "status": "translated",
+                    "text_fa": "از اینجا تشریف ببرید فرد کم‌هوش [سانسور شده]",
+                    "context_fa": None,
+                    "reason": "تلطیف و جایگزینی ناسزا"
+                }
+            else:
+                data = {
+                    "status": "translated",
+                    "text_fa": "از اینجا گمشو بیرون، تو احمق لعنتی!",
+                    "context_fa": None,
+                    "reason": "ترجمه وفادار عامیانه بدون سانسور"
+                }
         elif "[SIMULATE_CENSORED]" in user_content:
             data = {
                 "status": "translated",
@@ -120,8 +135,64 @@ def mock_llm_handler(
     # 2. TRANSLATION QUALITY EVALUATION (Project A)
     # =========================================================================
     if "دستورالعمل کنترل کیفیت و وفاداری ترجمه" in sys_content or "English original:" in user_content:
-        # Check if translation was censored
-        if "[سانسور شده]" in user_content or "کم‌هوش" in user_content:
+        has_ctx = "English context:" in user_content
+        # Check simulated cases
+        if "[SIMULATE_SEVERITY_SHIFT]" in user_content:
+            data = {
+                "fluency": 5,
+                "naturalness": 5,
+                "register_match": 3,
+                "cultural_fit": 3,
+                "semantic_fidelity": 3,
+                "severity_fidelity": 2,
+                "context_fidelity": {"applicable": has_ctx, "score": 5 if has_ctx else None},
+                "target_preserved": True,
+                "stance_preserved": True,
+                "negation_preserved": True,
+                "quotation_preserved": True,
+                "ambiguity_preserved": True,
+                "flags": ["severity_changed"],
+                "reason": "شدت ناسزا به طور ناموجه تلطیف شده است."
+            }
+        elif "[SIMULATE_JUDGE_DISAGREEMENT]" in user_content:
+            if "command" in model or "claude" in model or "sonnet" in model or "deepseek" not in model:
+                # Judge 2 flags censorship
+                data = {
+                    "fluency": 3,
+                    "naturalness": 3,
+                    "register_match": 2,
+                    "cultural_fit": 2,
+                    "semantic_fidelity": 2,
+                    "severity_fidelity": 1,
+                    "context_fidelity": {"applicable": has_ctx, "score": 2 if has_ctx else None},
+                    "target_preserved": True,
+                    "stance_preserved": False,
+                    "negation_preserved": True,
+                    "quotation_preserved": True,
+                    "ambiguity_preserved": True,
+                    "flags": ["censored_content"],
+                    "reason": "داور دوم سانسور پنهان را تشخیص داد."
+                }
+            else:
+                # Judge 1 passes
+                data = {
+                    "fluency": 5,
+                    "naturalness": 5,
+                    "register_match": 5,
+                    "cultural_fit": 5,
+                    "semantic_fidelity": 5,
+                    "severity_fidelity": 5,
+                    "context_fidelity": {"applicable": has_ctx, "score": 5 if has_ctx else None},
+                    "target_preserved": True,
+                    "stance_preserved": True,
+                    "negation_preserved": True,
+                    "quotation_preserved": True,
+                    "ambiguity_preserved": True,
+                    "flags": [],
+                    "reason": "داور اول ترجمه را بدون اشکال ارزیابی کرد."
+                }
+
+        elif "[سانسور شده]" in user_content or "کم‌هوش" in user_content:
             data = {
                 "fluency": 3,
                 "naturalness": 2,
@@ -129,7 +200,7 @@ def mock_llm_handler(
                 "cultural_fit": 2,
                 "semantic_fidelity": 2,
                 "severity_fidelity": 1,
-                "context_fidelity": 5,
+                "context_fidelity": {"applicable": has_ctx, "score": 2 if has_ctx else None},
                 "target_preserved": True,
                 "stance_preserved": False,
                 "negation_preserved": True,
@@ -146,7 +217,7 @@ def mock_llm_handler(
                 "cultural_fit": 5,
                 "semantic_fidelity": 5,
                 "severity_fidelity": 5,
-                "context_fidelity": 5,
+                "context_fidelity": {"applicable": has_ctx, "score": 5 if has_ctx else None},
                 "target_preserved": True,
                 "stance_preserved": True,
                 "negation_preserved": True,
@@ -161,6 +232,7 @@ def mock_llm_handler(
             "parsed_json": data,
             "usage": usage
         }
+
 
     # =========================================================================
     # 3. WHITE GENERATION RECIPES (Project B)

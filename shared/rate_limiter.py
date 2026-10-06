@@ -52,6 +52,10 @@ class RateLimiter:
 
             self.call_count += 1
 
+    @property
+    def total_calls(self) -> int:
+        return self.call_count
+
     def get_stats(self) -> dict:
         with self._lock:
             return {

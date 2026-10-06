@@ -1,6 +1,7 @@
 """
 SQLite persistent storage and checkpointing for the Persianization pipeline.
-Provides crash-resilience, attempt auditing, response caching, and atomic state updates.
+Provides crash-resilience, attempt auditing, response caching with strict invalidation,
+atomic state updates, and tracking of dual quality judges.
 """
 import os
 import json
@@ -22,7 +23,6 @@ class PersianizationStorage:
         if not hasattr(self._local, "conn") or self._local.conn is None:
             self._local.conn = sqlite3.connect(self.db_path, timeout=60.0)
             self._local.conn.row_factory = sqlite3.Row
-            # Enable WAL mode for concurrent read/write performance
             self._local.conn.execute("PRAGMA journal_mode=WAL;")
             self._local.conn.execute("PRAGMA synchronous=NORMAL;")
         return self._local.conn
@@ -33,6 +33,8 @@ class PersianizationStorage:
             conn.execute("""
             CREATE TABLE IF NOT EXISTS records (
                 id TEXT PRIMARY KEY,
+                input_order_idx INTEGER,
+                request_id TEXT,
                 raw_text TEXT NOT NULL,
                 raw_context TEXT,
                 original_language TEXT,
@@ -44,9 +46,16 @@ class PersianizationStorage:
                 final_persian_text TEXT,
                 final_persian_context TEXT,
                 selected_model TEXT,
+                evaluator_1_model TEXT,
                 quality_scores_json TEXT,
                 quality_flags_json TEXT,
                 reason TEXT,
+                evaluator_2_model TEXT,
+                quality_scores_2_json TEXT,
+                quality_flags_2_json TEXT,
+                second_judge_reason TEXT,
+                second_judge_sampling_type TEXT,
+                disagreement_flag INTEGER DEFAULT 0,
                 source TEXT,
                 source_label TEXT,
                 parent_id TEXT,
@@ -65,6 +74,7 @@ class PersianizationStorage:
             CREATE TABLE IF NOT EXISTS attempts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 record_id TEXT NOT NULL,
+                request_id TEXT,
                 step TEXT NOT NULL,
                 model TEXT NOT NULL,
                 prompt_tokens INTEGER,
@@ -100,14 +110,17 @@ class PersianizationStorage:
             """)
 
     def get_completed_ids(self) -> Set[str]:
-        """Returns set of record IDs that are already completed and accepted or routed."""
+        """Returns set of record IDs that are completed and resolved."""
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM records WHERE quality_status IN ('accepted', 'not_required') OR translation_status IN ('not_required');")
+        cursor.execute("""
+            SELECT id FROM records 
+            WHERE quality_status IN ('accepted', 'not_evaluated') 
+               OR translation_status IN ('not_required');
+        """)
         return {row["id"] for row in cursor.fetchall()}
 
     def get_all_saved_ids(self) -> Set[str]:
-        """Returns set of all IDs currently in the database."""
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM records;")
@@ -117,12 +130,18 @@ class PersianizationStorage:
         """Upserts a record into the database checkpoint."""
         conn = self._get_connection()
         now = datetime.now(timezone.utc).isoformat()
-        
-        quality_scores = record_data.get("quality_scores")
-        scores_json = json.dumps(quality_scores, ensure_ascii=False) if quality_scores else None
 
-        quality_flags = record_data.get("quality_flags")
-        flags_json = json.dumps(quality_flags, ensure_ascii=False) if quality_flags else None
+        scores_1 = record_data.get("quality_scores")
+        scores_1_json = json.dumps(scores_1, ensure_ascii=False) if scores_1 else None
+
+        flags_1 = record_data.get("quality_flags")
+        flags_1_json = json.dumps(flags_1, ensure_ascii=False) if flags_1 else None
+
+        scores_2 = record_data.get("quality_scores_2")
+        scores_2_json = json.dumps(scores_2, ensure_ascii=False) if scores_2 else None
+
+        flags_2 = record_data.get("quality_flags_2")
+        flags_2_json = json.dumps(flags_2, ensure_ascii=False) if flags_2 else None
 
         meta = record_data.get("metadata")
         meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
@@ -133,18 +152,22 @@ class PersianizationStorage:
         with conn:
             conn.execute("""
             INSERT INTO records (
-                id, raw_text, raw_context, original_language, origin,
+                id, input_order_idx, request_id, raw_text, raw_context, original_language, origin,
                 translation_status, quality_status, offense_label, annotation_status,
                 final_persian_text, final_persian_context, selected_model,
-                quality_scores_json, quality_flags_json, reason,
+                evaluator_1_model, quality_scores_json, quality_flags_json, reason,
+                evaluator_2_model, quality_scores_2_json, quality_flags_2_json, second_judge_reason,
+                second_judge_sampling_type, disagreement_flag,
                 source, source_label, parent_id, group_id, split,
                 metadata_json, human_decision, human_edited_text, human_notes, reviewer_name,
                 updated_at_utc
             ) VALUES (
-                :id, :raw_text, :raw_context, :original_language, :origin,
+                :id, :input_order_idx, :request_id, :raw_text, :raw_context, :original_language, :origin,
                 :translation_status, :quality_status, :offense_label, :annotation_status,
                 :final_persian_text, :final_persian_context, :selected_model,
-                :quality_scores_json, :quality_flags_json, :reason,
+                :evaluator_1_model, :quality_scores_json, :quality_flags_json, :reason,
+                :evaluator_2_model, :quality_scores_2_json, :quality_flags_2_json, :second_judge_reason,
+                :second_judge_sampling_type, :disagreement_flag,
                 :source, :source_label, :parent_id, :group_id, :split,
                 :metadata_json, :human_decision, :human_edited_text, :human_notes, :reviewer_name,
                 :updated_at_utc
@@ -157,9 +180,16 @@ class PersianizationStorage:
                 final_persian_text=excluded.final_persian_text,
                 final_persian_context=excluded.final_persian_context,
                 selected_model=excluded.selected_model,
+                evaluator_1_model=excluded.evaluator_1_model,
                 quality_scores_json=excluded.quality_scores_json,
                 quality_flags_json=excluded.quality_flags_json,
                 reason=excluded.reason,
+                evaluator_2_model=excluded.evaluator_2_model,
+                quality_scores_2_json=excluded.quality_scores_2_json,
+                quality_flags_2_json=excluded.quality_flags_2_json,
+                second_judge_reason=excluded.second_judge_reason,
+                second_judge_sampling_type=excluded.second_judge_sampling_type,
+                disagreement_flag=excluded.disagreement_flag,
                 human_decision=excluded.human_decision,
                 human_edited_text=excluded.human_edited_text,
                 human_notes=excluded.human_notes,
@@ -167,20 +197,29 @@ class PersianizationStorage:
                 updated_at_utc=excluded.updated_at_utc;
             """, {
                 "id": record_data["id"],
-                "raw_text": record_data["text"],
-                "raw_context": record_data.get("context"),
-                "original_language": record_data.get("language"),
+                "input_order_idx": record_data.get("input_order_idx", 0),
+                "request_id": record_data.get("request_id"),
+                "raw_text": record_data.get("raw_text") or record_data.get("text"),
+                "raw_context": record_data.get("raw_context") or record_data.get("context"),
+                "original_language": record_data.get("language") or record_data.get("original_language"),
                 "origin": record_data["origin"],
                 "translation_status": record_data.get("translation_status", "not_required"),
-                "quality_status": record_data.get("quality_status", "not_required"),
+                "quality_status": record_data.get("quality_status", "not_evaluated"),
                 "offense_label": record_data.get("offense_label"),
                 "annotation_status": record_data.get("annotation_status", "not_annotated"),
                 "final_persian_text": record_data.get("final_persian_text"),
                 "final_persian_context": record_data.get("final_persian_context"),
                 "selected_model": record_data.get("selected_model"),
-                "quality_scores_json": scores_json,
-                "quality_flags_json": flags_json,
+                "evaluator_1_model": record_data.get("evaluator_1_model"),
+                "quality_scores_json": scores_1_json,
+                "quality_flags_json": flags_1_json,
                 "reason": record_data.get("reason"),
+                "evaluator_2_model": record_data.get("evaluator_2_model"),
+                "quality_scores_2_json": scores_2_json,
+                "quality_flags_2_json": flags_2_json,
+                "second_judge_reason": record_data.get("second_judge_reason"),
+                "second_judge_sampling_type": record_data.get("second_judge_sampling_type"),
+                "disagreement_flag": 1 if record_data.get("disagreement_flag") else 0,
                 "source": record_data.get("source"),
                 "source_label": src_lbl_str,
                 "parent_id": record_data.get("parent_id"),
@@ -204,7 +243,8 @@ class PersianizationStorage:
         raw_completion: str,
         parsed_json: Optional[Dict[str, Any]],
         status: str,
-        error_message: Optional[str] = None
+        error_message: Optional[str] = None,
+        request_id: Optional[str] = None
     ) -> None:
         """Logs an API model invocation attempt."""
         conn = self._get_connection()
@@ -212,11 +252,12 @@ class PersianizationStorage:
         with conn:
             conn.execute("""
             INSERT INTO attempts (
-                record_id, step, model, prompt_tokens, completion_tokens, total_tokens,
+                record_id, request_id, step, model, prompt_tokens, completion_tokens, total_tokens,
                 latency_sec, raw_completion, parsed_json, status, error_message, created_at_utc
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """, (
                 record_id,
+                request_id,
                 step,
                 model,
                 usage.get("prompt_tokens", 0),
@@ -252,17 +293,15 @@ class PersianizationStorage:
             """, (cache_key, json.dumps(data, ensure_ascii=False), now))
 
     def fetch_all_records(self) -> List[Dict[str, Any]]:
-        """Retrieves all records as dictionaries."""
+        """Retrieves all records as dictionaries, ordered by input order."""
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM records ORDER BY id;")
+        cursor.execute("SELECT * FROM records ORDER BY input_order_idx, id;")
         results = []
         for row in cursor.fetchall():
             d = dict(row)
-            # Ensure 'text' field is present for downstream consumers (maps to final_persian_text if available, else raw_text)
             d["text"] = d.get("final_persian_text") or d.get("raw_text")
-            # Parse json fields
-            for k in ("quality_scores_json", "quality_flags_json", "metadata_json"):
+            for k in ("quality_scores_json", "quality_flags_json", "quality_scores_2_json", "quality_flags_2_json", "metadata_json"):
                 if d.get(k):
                     try:
                         d[k.replace("_json", "")] = json.loads(d[k])
@@ -271,8 +310,27 @@ class PersianizationStorage:
             results.append(d)
         return results
 
+    def fetch_record_by_id(self, record_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a single record by its ID with JSON fields deserialized."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM records WHERE id = ?;", (record_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["text"] = d.get("final_persian_text") or d.get("raw_text")
+        for k in ("quality_scores_json", "quality_flags_json", "quality_scores_2_json", "quality_flags_2_json", "metadata_json"):
+            if d.get(k):
+                try:
+                    d[k.replace("_json", "")] = json.loads(d[k])
+                except Exception:
+                    d[k.replace("_json", "")] = None
+            else:
+                d[k.replace("_json", "")] = None
+        return d
+
     def fetch_all_attempts(self) -> List[Dict[str, Any]]:
-        """Retrieves all logged attempts."""
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM attempts ORDER BY id;")

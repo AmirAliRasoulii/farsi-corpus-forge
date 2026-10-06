@@ -9,3 +9,4 @@ from shared.rate_limiter import RateLimiter, BudgetExceededError
 from shared.run_lock import RunDirectoryLock
 from shared.api_client import AvalAIClient, AuthenticationError, ModelRefusalError, extract_json_from_completion
 from shared.excel_utils import export_records_to_excel, read_reviewed_excel
+from shared.circuit_breaker import PipelineCircuitBreaker, CircuitBreakerTripped

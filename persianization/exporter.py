@@ -51,7 +51,10 @@ def export_persianization_outputs(
     standard_fields = [
         "id", "origin", "translation_status", "quality_status",
         "offense_label", "annotation_status", "final_persian_text", "final_persian_context",
-        "raw_text", "raw_context", "selected_model", "quality_scores", "quality_flags",
+        "raw_text", "raw_context", "selected_model",
+        "evaluator_1_model", "quality_scores", "quality_flags",
+        "evaluator_2_model", "quality_scores_2", "quality_flags_2",
+        "second_judge_sampling_type", "disagreement_flag",
         "reason", "source", "source_label", "parent_id", "group_id", "split"
     ]
 
@@ -75,6 +78,7 @@ def export_persianization_outputs(
         if r.get("quality_status") in ("review_required", "pending_human_audit")
         or r.get("translation_status") in ("uncertain", "unable", "unresolved")
         or r.get("origin") in ("fingilish", "uncertain")
+        or r.get("disagreement_flag") == 1
     ]
 
     failed_or_unresolved_records = [
@@ -133,6 +137,12 @@ def export_persianization_outputs(
         "review_queue_count": len(review_queue_records),
         "failed_or_unresolved_count": len(failed_or_unresolved_records),
         "pending_human_audit_count": sum(1 for r in all_records if r.get("quality_status") == "pending_human_audit"),
+        "second_judge_audits": {
+            "total": sum(1 for r in all_records if r.get("evaluator_2_model")),
+            "random_sample": sum(1 for r in all_records if r.get("second_judge_sampling_type") == "random_sample"),
+            "targeted": sum(1 for r in all_records if str(r.get("second_judge_sampling_type") or "").startswith("targeted")),
+            "disagreements": sum(1 for r in all_records if r.get("disagreement_flag") == 1)
+        },
         "total_api_calls_logged": len(all_attempts),
         "tokens_usage": {
             "prompt_tokens": total_prompt_tokens,

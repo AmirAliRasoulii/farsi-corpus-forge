@@ -11,7 +11,7 @@ import sys
 import uuid
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from shared.io_utils import stream_input_records
 from shared.lineage import LineageTracker
@@ -26,6 +26,52 @@ from white_generation.quality_judge import WhiteQualityJudge
 from white_generation.offense_judges import BlindOffensePanel
 from white_generation.exporter import export_white_generation_outputs
 from white_generation.review_manager import ingest_white_generation_review
+
+
+def determine_seed_status(seed_record: Dict[str, Any]) -> str:
+    """
+    Distinguishes seed annotation statuses:
+      - verified_offensive: label is 1
+      - verified_non_offensive: label is 0
+      - ambiguous_after_annotation: explicitly marked ambiguous
+      - unannotated: label is None or unannotated (NOT ambiguous!)
+    """
+    lbl = seed_record.get("source_label")
+    ann_status = seed_record.get("annotation_status")
+    meta = seed_record.get("metadata") or {}
+
+    if meta.get("category") == "ambiguous" or ann_status == "ambiguous":
+        return "ambiguous_after_annotation"
+
+    if lbl is not None and str(lbl).strip() != "":
+        try:
+            val = int(lbl)
+            if val == 1:
+                return "verified_offensive"
+            elif val == 0:
+                return "verified_non_offensive"
+        except (ValueError, TypeError):
+            pass
+
+    return "unannotated"
+
+
+def is_recipe_eligible(recipe_name: str, seed_status: str) -> Tuple[bool, str]:
+    """
+    Determines if a recipe is eligible for a given seed status.
+    """
+    if recipe_name == "criticism":
+        if seed_status in ("verified_offensive", "ambiguous_after_annotation"):
+            return True, "Eligible"
+        return False, f"Criticism recipe requires offensive or ambiguous seed (got '{seed_status}')."
+
+    if recipe_name == "minimal_disambiguation":
+        if seed_status in ("ambiguous_after_annotation", "unannotated"):
+            return True, "Eligible"
+        return False, f"Disambiguation recipe requires ambiguous or unannotated seed (got '{seed_status}')."
+
+    # hard_negative, ordinary, educational, reported_condemnation are applicable to all seed statuses
+    return True, "Eligible"
 
 
 def process_seed_and_generate(
@@ -44,6 +90,7 @@ def process_seed_and_generate(
     raw_text = seed_record["text"]
     group_id = seed_record.get("group_id") or seed_id
     split = seed_record.get("split", "unassigned")
+    seed_status = determine_seed_status(seed_record)
 
     # Verify seed language is Persian
     lang_info = detect_language(raw_text, seed_record.get("language"))
@@ -65,6 +112,37 @@ def process_seed_and_generate(
     for recipe_name in active_recipes:
         cand_id = f"cand_{seed_id}_{recipe_name}"
 
+        # Check recipe eligibility
+        eligible, reason_ineligible = is_recipe_eligible(recipe_name, seed_status)
+        if not eligible:
+            cand_row = {
+                "id": cand_id,
+                "seed_id": seed_id,
+                "parent_id": seed_id,
+                "group_id": group_id,
+                "split": split,
+                "seed_text": raw_text,
+                "seed_source_label": seed_record.get("source_label"),
+                "seed_status": seed_status,
+                "recipe": recipe_name,
+                "candidate_text": None,
+                "candidate_context": None,
+                "origin": "generated_white",
+                "generator_status": "inapplicable",
+                "persian_quality_score": None,
+                "quality_status": "not_applicable",
+                "judge_votes": None,
+                "consensus_status": "inapplicable",
+                "final_label": None,
+                "final_status": "inapplicable",
+                "flags": ["recipe_ineligible"],
+                "reason": reason_ineligible,
+                "generator_model": generator.config.generator_model
+            }
+            storage.save_candidate(cand_row)
+            generated_results.append(cand_row)
+            continue
+
         # 1. Generate candidate
         gen_res = generator.generate_candidate(
             candidate_id=cand_id,
@@ -85,6 +163,7 @@ def process_seed_and_generate(
                 "split": split,
                 "seed_text": raw_text,
                 "seed_source_label": seed_record.get("source_label"),
+                "seed_status": seed_status,
                 "recipe": recipe_name,
                 "candidate_text": None,
                 "candidate_context": None,
@@ -113,6 +192,7 @@ def process_seed_and_generate(
                 "split": split,
                 "seed_text": raw_text,
                 "seed_source_label": seed_record.get("source_label"),
+                "seed_status": seed_status,
                 "recipe": recipe_name,
                 "candidate_text": None,
                 "candidate_context": None,
@@ -179,6 +259,7 @@ def process_seed_and_generate(
             "split": split,
             "seed_text": raw_text,
             "seed_source_label": seed_record.get("source_label"),
+            "seed_status": seed_status,
             "recipe": recipe_name,
             "candidate_text": cand_text,
             "candidate_context": cand_context,

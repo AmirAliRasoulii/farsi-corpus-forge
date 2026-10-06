@@ -37,6 +37,7 @@ class WhiteGenerationStorage:
                 split TEXT,
                 seed_text TEXT NOT NULL,
                 seed_source_label TEXT,
+                seed_status TEXT NOT NULL DEFAULT 'unannotated',
                 recipe TEXT NOT NULL,
                 candidate_text TEXT,
                 candidate_context TEXT,
@@ -105,7 +106,7 @@ class WhiteGenerationStorage:
             conn.execute("""
             INSERT INTO candidates (
                 id, seed_id, parent_id, group_id, split,
-                seed_text, seed_source_label, recipe,
+                seed_text, seed_source_label, seed_status, recipe,
                 candidate_text, candidate_context, origin,
                 generator_status, persian_quality_score, quality_status,
                 judge_votes_json, consensus_status, final_label,
@@ -114,7 +115,7 @@ class WhiteGenerationStorage:
                 updated_at_utc
             ) VALUES (
                 :id, :seed_id, :parent_id, :group_id, :split,
-                :seed_text, :seed_source_label, :recipe,
+                :seed_text, :seed_source_label, :seed_status, :recipe,
                 :candidate_text, :candidate_context, :origin,
                 :generator_status, :persian_quality_score, :quality_status,
                 :judge_votes_json, :consensus_status, :final_label,
@@ -122,6 +123,7 @@ class WhiteGenerationStorage:
                 :human_decision, :human_edited_text, :human_notes, :reviewer_name,
                 :updated_at_utc
             ) ON CONFLICT(id) DO UPDATE SET
+                seed_status=excluded.seed_status,
                 candidate_text=excluded.candidate_text,
                 generator_status=excluded.generator_status,
                 persian_quality_score=excluded.persian_quality_score,
@@ -145,6 +147,7 @@ class WhiteGenerationStorage:
                 "split": cand_data.get("split", "unassigned"),
                 "seed_text": cand_data["seed_text"],
                 "seed_source_label": seed_lbl_str,
+                "seed_status": cand_data.get("seed_status", "unannotated"),
                 "recipe": cand_data["recipe"],
                 "candidate_text": cand_data.get("candidate_text"),
                 "candidate_context": cand_data.get("candidate_context"),
