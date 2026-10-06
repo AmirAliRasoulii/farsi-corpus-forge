@@ -4,7 +4,10 @@ Takes Persian seed records and generates clean text candidates.
 """
 import json
 from typing import Dict, Any, Optional
-from shared.api_client import AvalAIClient
+from shared.api_client import AvalAIClient, AuthenticationError
+from shared.rate_limiter import BudgetExceededError
+from shared.circuit_breaker import CircuitBreakerTripped
+from shared.schema_validator import validate_generator_output, SchemaValidationError
 from white_generation.config import WhiteGenerationConfig
 from white_generation.storage import WhiteGenerationStorage
 
@@ -62,12 +65,14 @@ class CandidateGenerator:
             parsed = res.get("parsed_json")
             raw_comp = res.get("raw_completion", "")
 
-            status = "failed"
-            error_msg = None
-            if parsed:
-                status = parsed.get("status", "generated")
-            else:
-                error_msg = "Failed to parse JSON completion from generator"
+            try:
+                valid_data = validate_generator_output(parsed, raw_completion=raw_comp)
+                status = valid_data["status"]
+                error_msg = None
+            except SchemaValidationError as sve:
+                status = "failed"
+                error_msg = str(sve)
+                valid_data = None
 
             self.storage.record_attempt(
                 candidate_id=candidate_id,
@@ -81,19 +86,19 @@ class CandidateGenerator:
                 error_message=error_msg
             )
 
-            if parsed and status == "generated":
+            if valid_data and status == "generated":
                 return {
                     "generator_status": "generated",
-                    "candidate_text": parsed.get("candidate_text"),
-                    "candidate_context": parsed.get("candidate_context"),
-                    "reason": parsed.get("reason", "")
+                    "candidate_text": valid_data.get("candidate_text"),
+                    "candidate_context": valid_data.get("candidate_context"),
+                    "reason": valid_data.get("reason", "")
                 }
-            elif parsed and status == "inapplicable":
+            elif valid_data and status == "inapplicable":
                 return {
                     "generator_status": "inapplicable",
                     "candidate_text": None,
                     "candidate_context": None,
-                    "reason": parsed.get("reason", "Recipe inapplicable to this seed")
+                    "reason": valid_data.get("reason", "Recipe inapplicable to this seed")
                 }
             else:
                 return {
@@ -102,6 +107,9 @@ class CandidateGenerator:
                     "candidate_context": None,
                     "reason": error_msg or "Generation failed"
                 }
+
+        except (AuthenticationError, BudgetExceededError, CircuitBreakerTripped):
+            raise
 
         except Exception as e:
             self.storage.record_attempt(

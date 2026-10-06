@@ -19,12 +19,15 @@
     "quotation_changed",
     "invented_context",
     "missing_content",
-    "untranslated_content"
+    "untranslated_content",
+    "ambiguity_changed",
+    "ambiguity_resolved_by_guess",
+    "context_distorted",
+    "context_removed"
   ],
   "warning_flags": [
     "literal_translation",
     "awkward_persian",
-    "ambiguity_resolved_by_guess",
     "needs_context"
   ],
   "human_audit_sample_rate": 0.10,

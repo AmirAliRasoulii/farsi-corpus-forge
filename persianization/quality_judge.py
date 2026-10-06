@@ -6,7 +6,10 @@ for stable 10% random audits and targeted high-risk cases.
 import json
 import hashlib
 from typing import Dict, Any, List, Optional, Tuple
-from shared.api_client import AvalAIClient
+from shared.api_client import AvalAIClient, AuthenticationError
+from shared.rate_limiter import BudgetExceededError
+from shared.circuit_breaker import CircuitBreakerTripped
+from shared.schema_validator import validate_quality_judge_output, SchemaValidationError
 from persianization.storage import PersianizationStorage
 from persianization.config import PersianizationConfig
 
@@ -291,64 +294,71 @@ class DualQualityJudge:
                 request_id=request_id
             )
 
-            if not parsed:
+            has_context = bool(raw_context_en and raw_context_en.strip())
+            try:
+                validated = validate_quality_judge_output(parsed, has_context=has_context, raw_completion=raw_comp)
+            except SchemaValidationError as sve:
+                self.storage.record_attempt(
+                    record_id=record_id,
+                    step=step_name,
+                    model=judge_model,
+                    usage=res.get("usage", {}),
+                    latency_sec=res.get("latency_sec", 0.0),
+                    raw_completion=raw_comp,
+                    parsed_json=parsed,
+                    status="failed",
+                    error_message=f"Schema validation error: {sve}",
+                    request_id=request_id
+                )
                 return {
                     "passed": False,
                     "scores": {},
                     "flags": ["qc_schema_error"],
-                    "reason": f"Model '{judge_model}' failed to return valid JSON schema."
+                    "reason": f"Model '{judge_model}' output schema validation failed: {sve}"
                 }
 
-            # Evaluate rubric
+            scores = validated["scores"]
+            flags = list(validated["flags"])
+            preservation = validated["preservation_checks"]
+
+            # Any failed preservation check adds a changed flag AND blocks acceptance
+            preservation_all_true = True
+            for check_key, val in preservation.items():
+                if val is False:
+                    preservation_all_true = False
+                    flag_name = check_key.replace("_preserved", "_changed")
+                    if flag_name not in flags:
+                        flags.append(flag_name)
+
             min_threshold = self.config.quality_accept_threshold
             blocking_flags = set(self.policy.get("blocking_flags", []))
             required_dimensions = self.policy.get("required_dimensions", [
                 "fluency", "naturalness", "register_match", "cultural_fit", "semantic_fidelity", "severity_fidelity"
             ])
 
-            scores = {}
-            for dim in required_dimensions:
-                val = parsed.get(dim)
-                try:
-                    scores[dim] = int(val) if val is not None else 1
-                except Exception:
-                    scores[dim] = 1
-
-            # Context fidelity check: applicable=false when no context
-            has_context = bool(raw_context_en and raw_context_en.strip())
-            ctx_fid = parsed.get("context_fidelity")
-            if has_context:
-                ctx_score = ctx_fid.get("score") if isinstance(ctx_fid, dict) else ctx_fid
-                try:
-                    scores["context_fidelity"] = int(ctx_score) if ctx_score is not None else 1
-                except Exception:
-                    scores["context_fidelity"] = 1
-            else:
-                scores["context_fidelity"] = None
-
-            raw_flags = parsed.get("flags") or []
-            flags = [str(f).strip() for f in raw_flags if f]
-
-            # Binary preservation checks
-            for check_key in ("target_preserved", "stance_preserved", "negation_preserved", "quotation_preserved", "ambiguity_preserved"):
-                if parsed.get(check_key) is False:
-                    flag_name = check_key.replace("_preserved", "_changed")
-                    if flag_name not in flags:
-                        flags.append(flag_name)
-
             has_blocking_flag = any(f in blocking_flags for f in flags)
             all_required_pass = all(scores.get(d, 0) >= min_threshold for d in required_dimensions)
-            passed = all_required_pass and not has_blocking_flag
+
+            # When context exists, context_fidelity score MUST be >= min_threshold
+            if has_context:
+                ctx_score = scores.get("context_fidelity")
+                context_pass = (ctx_score is not None and ctx_score >= min_threshold)
+            else:
+                context_pass = True
+
+            passed = all_required_pass and context_pass and preservation_all_true and not has_blocking_flag
 
             result_data = {
                 "passed": passed,
                 "scores": scores,
                 "flags": flags,
-                "reason": parsed.get("reason", "")
+                "reason": validated.get("reason", "")
             }
             self.storage.set_cache(cache_key, result_data)
             return result_data
 
+        except (AuthenticationError, BudgetExceededError, CircuitBreakerTripped):
+            raise
         except Exception as e:
             self.storage.record_attempt(
                 record_id=record_id,

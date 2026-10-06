@@ -81,17 +81,27 @@ def export_records_to_excel(
             if k not in columns and not k.startswith("_"):
                 columns.append(k)
 
-    # Human-in-the-loop review columns to append
-    hitl_cols = []
-    if include_hitl_columns:
-        hitl_cols = [
-            "human_decision",      # 'accept', 'reject', 'edited' (or '0' / '1' for label)
-            "human_edited_text",   # Edited text if modified
-            "human_notes",         # Notes / reviewer reason
-            "reviewer_name"        # Name or ID of reviewer
-        ]
+    # Human-in-the-loop review columns
+    hitl_cols = [
+        "human_decision",      # 'accept', 'reject', 'edited' (or '0' / '1' for label)
+        "human_edited_text",   # Edited text if modified
+        "human_notes",         # Notes / reviewer reason
+        "reviewer_name"        # Name or ID of reviewer
+    ]
 
-    all_headers = columns + hitl_cols
+    all_headers: List[str] = []
+    seen_headers = set()
+    for col in columns:
+        if col not in seen_headers:
+            all_headers.append(col)
+            seen_headers.add(col)
+
+    if include_hitl_columns:
+        for hc in hitl_cols:
+            if hc not in seen_headers:
+                all_headers.append(hc)
+                seen_headers.add(hc)
+
     ws.append(all_headers)
 
     # Style header row
@@ -105,8 +115,14 @@ def export_records_to_excel(
 
     # Write records
     for row_idx, rec in enumerate(records, start=2):
-        row_status = rec.get("status") or rec.get("translation_status") or rec.get("final_status", "")
-        raw_flags = rec.get("flags")
+        row_status = (
+            rec.get("quality_status") or
+            rec.get("status") or
+            rec.get("translation_status") or
+            rec.get("final_status") or
+            rec.get("annotation_status", "")
+        )
+        raw_flags = rec.get("quality_flags") or rec.get("flags") or []
         if isinstance(raw_flags, str):
             flags_list = [raw_flags]
         elif isinstance(raw_flags, list):
@@ -117,7 +133,7 @@ def export_records_to_excel(
         color_tag = determine_row_status_color(str(row_status), flags_list)
         row_fill = COLOR_FILLS.get(color_tag) if color_tag else None
 
-        for col_idx, col_name in enumerate(columns, start=1):
+        for col_idx, col_name in enumerate(all_headers, start=1):
             val = rec.get(col_name)
             if isinstance(val, (dict, list)):
                 import json
@@ -132,14 +148,8 @@ def export_records_to_excel(
             cell = ws.cell(row=row_idx, column=col_idx, value=sanitized_val)
             cell.font = REGULAR_FONT
             cell.alignment = Alignment(vertical="top", wrap_text=True)
-            if row_fill and col_name in ("id", "status", "flags", "reason"):
+            if row_fill and col_name in ("id", "status", "quality_status", "translation_status", "flags", "quality_flags", "reason"):
                 cell.fill = row_fill
-
-        # HITL editable columns (styled with light green header/background to signify human input area)
-        for h_idx, h_col in enumerate(hitl_cols, start=len(columns) + 1):
-            cell = ws.cell(row=row_idx, column=h_idx, value="")
-            cell.font = REGULAR_FONT
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
 
     # Add warning banner if length exceeded
     if has_exceeded_length:
@@ -185,18 +195,23 @@ def read_reviewed_excel(
     if not headers:
         raise ValueError("Excel file is empty or missing headers.")
 
-    # Check for warning row
-    start_row = 2
-    if str(headers[0]).startswith("WARNING:"):
-        headers = [cell.value for cell in ws[2] if cell.value is not None]
-        start_row = 3
+    cleaned_headers = [str(h).strip() for h in headers]
+    if len(cleaned_headers) != len(set(cleaned_headers)):
+        seen = set()
+        duplicates = set()
+        for h in cleaned_headers:
+            if h in seen:
+                duplicates.add(h)
+            seen.add(h)
+        raise ValueError(f"Excel file contains duplicate header columns: {sorted(list(duplicates))}")
 
-    header_to_col = {str(h).strip(): idx for idx, h in enumerate(headers, start=1)}
+    header_to_col = {h: idx for idx, h in enumerate(cleaned_headers, start=1)}
     
     if "id" not in header_to_col:
         raise ValueError("Excel file is missing required 'id' column.")
 
     reviewed_records = []
+    start_row = 2
 
     for r_idx in range(start_row, ws.max_row + 1):
         rec_id = ws.cell(row=r_idx, column=header_to_col["id"]).value

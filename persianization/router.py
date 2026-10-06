@@ -34,7 +34,11 @@ def route_record_languages(
     reason = text_info["reason"]
 
     # Evaluate target text
-    if text_lang == "fa":
+    if text_info.get("is_uncertain") or "language_script_conflict" in text_info.get("flags", []):
+        origin = text_info.get("origin_status", "uncertain")
+        requires_text_translation = False
+        routing_status = "needs_review"
+    elif text_lang == "fa":
         origin = "native_fa"
         requires_text_translation = False
     elif text_lang == "en":

@@ -3,7 +3,9 @@ Independent Persian quality judge for white candidates.
 Validates naturalness, grammatical fluency, and conversion success.
 """
 from typing import Dict, Any, Optional
-from shared.api_client import AvalAIClient
+from shared.api_client import AvalAIClient, AuthenticationError
+from shared.rate_limiter import BudgetExceededError
+from shared.circuit_breaker import CircuitBreakerTripped
 from white_generation.config import WhiteGenerationConfig
 from white_generation.storage import WhiteGenerationStorage
 
@@ -72,7 +74,7 @@ class WhiteQualityJudge:
                 error_message=None if parsed else "QC JSON parse failure"
             )
 
-            if not parsed:
+            if not parsed or not isinstance(parsed, dict):
                 return {
                     "quality_status": "review_required",
                     "persian_quality_score": 1,
@@ -80,13 +82,20 @@ class WhiteQualityJudge:
                     "reason": "Failed to parse quality evaluation response"
                 }
 
-            fluency = int(parsed.get("fluency", 1))
-            naturalness = int(parsed.get("naturalness", 1))
-            conversion_success = int(parsed.get("conversion_success", 1))
-            avg_score = (fluency + naturalness + conversion_success) / 3.0
+            scores = []
+            for dim in ("fluency", "naturalness", "conversion_success"):
+                val = parsed.get(dim)
+                if isinstance(val, bool) or not isinstance(val, int) or val < 1 or val > 5:
+                    scores.append(1)
+                else:
+                    scores.append(val)
 
-            flags = parsed.get("flags", [])
+            avg_score = sum(scores) / len(scores)
+            raw_flags = parsed.get("flags") or []
+            flags = [str(f) for f in raw_flags] if isinstance(raw_flags, list) else []
             is_persian = parsed.get("is_persian", True)
+            if not isinstance(is_persian, bool):
+                is_persian = True
 
             if avg_score >= self.min_score and is_persian:
                 status = "accepted"
@@ -97,9 +106,11 @@ class WhiteQualityJudge:
                 "quality_status": status,
                 "persian_quality_score": round(avg_score, 2),
                 "flags": flags,
-                "reason": parsed.get("reason", "")
+                "reason": str(parsed.get("reason", ""))
             }
 
+        except (AuthenticationError, BudgetExceededError, CircuitBreakerTripped):
+            raise
         except Exception as e:
             self.storage.record_attempt(
                 candidate_id=candidate_id,

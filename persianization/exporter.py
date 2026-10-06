@@ -59,19 +59,36 @@ def export_persianization_outputs(
     ]
 
     # Subsets
-    native_fa_records = [r for r in all_records if r.get("origin") == "native_fa"]
+    native_fa_records = [
+        r for r in all_records 
+        if r.get("origin") == "native_fa" and r.get("quality_status") != "rejected"
+    ]
     
     accepted_translations = [
         r for r in all_records 
         if r.get("origin") == "translated_en_to_fa" and r.get("quality_status") == "accepted"
     ]
 
-    # accepted_persian includes BOTH native_fa and accepted translations
+    # accepted_persian includes non-rejected native_fa and accepted translations
     accepted_persian = [
         r for r in all_records
-        if (r.get("origin") == "native_fa") or 
-           (r.get("origin") == "translated_en_to_fa" and r.get("quality_status") == "accepted")
+        if (
+            (r.get("origin") == "native_fa" and r.get("quality_status") != "rejected") or 
+            (r.get("origin") == "translated_en_to_fa" and r.get("quality_status") == "accepted")
+        )
     ]
+
+    # Block split leakage records from entering accepted_persian publication
+    if leakage_report.get("has_blocking_leakage") or leakage_report.get("split_violations"):
+        from shared.lineage import compute_text_hash
+        conflicting_groups = {v.get("group_id") for v in leakage_report.get("split_violations", []) if v.get("group_id")}
+        conflicting_hashes = {v.get("text_hash") for v in leakage_report.get("split_violations", []) if v.get("text_hash")}
+        
+        accepted_persian = [
+            r for r in accepted_persian
+            if r.get("group_id") not in conflicting_groups and 
+               compute_text_hash(r.get("text") or r.get("final_persian_text") or "") not in conflicting_hashes
+        ]
 
     review_queue_records = [
         r for r in all_records
