@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
+from shared.model_aliases import canonicalize_model_id
 
 
 @dataclass
@@ -54,12 +55,37 @@ class WhiteGenerationConfig:
     output_dir: str = "outputs/white_generation"
 
     def validate(self) -> None:
-        if not self.generator_model:
+        if not self.generator_model or not self.generator_model.strip():
             raise ValueError("GENERATOR_MODEL must be specified.")
-        if not self.quality_model:
+        if not self.quality_model or not self.quality_model.strip():
             raise ValueError("WHITE_QUALITY_MODEL must be specified.")
         if len(self.judge_models) != 4:
             raise ValueError(f"Exactly 4 offense judge models required, got {len(self.judge_models)}.")
+        for idx, jm in enumerate(self.judge_models, 1):
+            if not jm or not jm.strip():
+                raise ValueError(f"Offense judge {idx} model ID cannot be empty.")
+
+        canon_gen = canonicalize_model_id(self.generator_model)
+        canon_qual = canonicalize_model_id(self.quality_model)
+        canon_judges = [canonicalize_model_id(jm) for jm in self.judge_models]
+
+        if canon_qual == canon_gen:
+            raise ValueError(
+                f"Model independence violation: WHITE_QUALITY_MODEL ('{self.quality_model}') "
+                f"must be distinct from GENERATOR_MODEL ('{self.generator_model}')."
+            )
+
+        if len(set(canon_judges)) != 4:
+            raise ValueError(
+                f"Model independence violation: All 4 offense judges must be distinct models. "
+                f"Got judges: {self.judge_models}"
+            )
+
+        if canon_gen in canon_judges:
+            raise ValueError(
+                f"Model independence violation: GENERATOR_MODEL ('{self.generator_model}') "
+                f"matches an offense judge model in panel."
+            )
 
 
 def load_white_config(env_path: Optional[str] = None) -> WhiteGenerationConfig:
@@ -77,8 +103,8 @@ def load_white_config(env_path: Optional[str] = None) -> WhiteGenerationConfig:
     except Exception:
         extra_headers = {}
 
-    generator_model = os.getenv("GENERATOR_MODEL", "gpt-4o-mini").strip()
-    quality_model = os.getenv("WHITE_QUALITY_MODEL", "claude-haiku-4-5").strip()
+    generator_model = os.getenv("GENERATOR_MODEL", "llama-3.3-70b-instruct").strip()
+    quality_model = os.getenv("WHITE_QUALITY_MODEL", "gpt-4o").strip()
 
     judge_models = [
         os.getenv("OFFENSE_JUDGE_1", "gpt-4o-mini").strip(),

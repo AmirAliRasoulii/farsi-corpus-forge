@@ -4,7 +4,10 @@ Judges evaluate candidate text blindly without seed, recipe, or target labels.
 Implements strict consensus voting rules (>=3 votes, 2-2 tie handling, self-reported confidence tracking).
 """
 from typing import Dict, Any, List, Optional, Tuple
-from shared.api_client import AvalAIClient
+from shared.api_client import AvalAIClient, AuthenticationError
+from shared.rate_limiter import BudgetExceededError
+from shared.circuit_breaker import CircuitBreakerTripped
+from shared.schema_validator import validate_offense_judge_output, SchemaValidationError
 from white_generation.config import WhiteGenerationConfig
 from white_generation.storage import WhiteGenerationStorage
 
@@ -69,19 +72,21 @@ class BlindOffensePanel:
                 parsed = res.get("parsed_json")
                 raw_comp = res.get("raw_completion", "")
 
-                label = None
-                confidence = None
-                reason = ""
-
-                if parsed and "label" in parsed:
-                    try:
-                        lbl_val = int(parsed["label"])
-                        if lbl_val in (0, 1):
-                            label = lbl_val
-                    except Exception:
-                        pass
-                    confidence = parsed.get("confidence")
-                    reason = parsed.get("reason", "")
+                val_err = None
+                try:
+                    val_data = validate_offense_judge_output(parsed, raw_completion=raw_comp)
+                    label = val_data["label"]
+                    confidence = val_data["confidence"]
+                    reason = val_data["reason"]
+                    flags_judge = val_data["flags"]
+                    status_attempt = "success"
+                except SchemaValidationError as sve:
+                    val_err = str(sve)
+                    label = None
+                    confidence = None
+                    reason = f"Schema validation error: {sve}"
+                    flags_judge = ["schema_error"]
+                    status_attempt = "failed"
 
                 self.storage.record_attempt(
                     candidate_id=candidate_id,
@@ -91,17 +96,22 @@ class BlindOffensePanel:
                     latency_sec=res.get("latency_sec", 0.0),
                     raw_completion=raw_comp,
                     parsed_json=parsed,
-                    status="success" if label is not None else "failed",
-                    error_message=None if label is not None else "Invalid label in vote"
+                    status=status_attempt,
+                    error_message=val_err
                 )
 
                 votes[judge_key] = {
                     "model": model,
                     "label": label,
                     "confidence": confidence,
+                    "self_reported_confidence": confidence,
+                    "confidence_description": "اطمینان خوداظهاری مدل (فاقد کالیبراسیون آماری مستقل)",
+                    "flags": flags_judge,
                     "reason": reason
                 }
 
+            except (AuthenticationError, BudgetExceededError, CircuitBreakerTripped):
+                raise
             except Exception as e:
                 self.storage.record_attempt(
                     candidate_id=candidate_id,
@@ -118,6 +128,9 @@ class BlindOffensePanel:
                     "model": model,
                     "label": None,
                     "confidence": None,
+                    "self_reported_confidence": None,
+                    "confidence_description": "اطمینان خوداظهاری مدل (فاقد کالیبراسیون آماری مستقل)",
+                    "flags": ["judge_exception"],
                     "reason": str(e)
                 }
 

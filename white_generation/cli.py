@@ -11,7 +11,7 @@ import sys
 import uuid
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Set
 
 from shared.io_utils import stream_input_records
 from shared.lineage import LineageTracker
@@ -81,7 +81,8 @@ def process_seed_and_generate(
     quality_judge: WhiteQualityJudge,
     offense_panel: BlindOffensePanel,
     storage: WhiteGenerationStorage,
-    lineage_tracker: LineageTracker
+    lineage_tracker: LineageTracker,
+    completed_keys: Optional[Set[str]] = None
 ) -> List[Dict[str, Any]]:
     """
     Processes a Persian seed across all active recipes.
@@ -111,6 +112,9 @@ def process_seed_and_generate(
 
     for recipe_name in active_recipes:
         cand_id = f"cand_{seed_id}_{recipe_name}"
+        if completed_keys and cand_id in completed_keys:
+            # Already completed; skip to avoid re-invoking LLM
+            continue
 
         # Check recipe eligibility
         eligible, reason_ineligible = is_recipe_eligible(recipe_name, seed_status)
@@ -289,15 +293,19 @@ def run_white_pipeline(
     limit: Optional[int] = None,
     recipes_filter: Optional[List[str]] = None,
     workers: Optional[int] = None,
+    batch_size: Optional[int] = None,
     mock_client: Optional[AvalAIClient] = None
 ) -> Dict[str, Any]:
-    """Runs the White Generation pipeline independently."""
+    """Runs the White Generation pipeline end-to-end with chunked streaming and blinded 4-judge evaluation."""
     config = load_white_config(env_file)
     if output_dir:
         config.output_dir = output_dir
 
+    effective_workers = workers if workers is not None and workers > 0 else config.max_workers
+    chunk_size = batch_size if batch_size is not None and batch_size > 0 else max(1, effective_workers * 2)
+
     os.makedirs(config.output_dir, exist_ok=True)
-    run_id = f"white_run_{uuid.uuid4().hex[:10]}"
+    run_id = f"run_{uuid.uuid4().hex[:10]}"
 
     with RunDirectoryLock(config.output_dir):
         db_path = os.path.join(config.output_dir, "white_generation_state.db")
@@ -318,77 +326,94 @@ def run_white_pipeline(
         offense_panel = BlindOffensePanel(config, client, storage)
         lineage_tracker = LineageTracker()
 
+        # Pre-populate lineage tracker from existing database candidates
+        lineage_tracker.populate_from_records(storage.fetch_all_candidates())
+
         active_recipes = recipes_filter or config.generation_policy.get("active_recipes", [
             "minimal_disambiguation", "criticism", "hard_negative", "ordinary"
         ])
 
         completed_keys = storage.get_completed_candidate_keys() if resume else set()
-        max_workers = workers if workers is not None else config.max_workers
-
-        seed_records = []
-        for rec in stream_input_records(input_file):
-            seed_records.append(rec)
-            if limit and len(seed_records) >= limit:
-                break
 
         print(f"[*] Starting White Generation Run: {run_id}")
-        print(f"[*] Persian Seeds to process: {len(seed_records)}")
+        print(f"[*] Concurrency Workers: {effective_workers}, Chunk Size: {chunk_size}")
         print(f"[*] Active Recipes: {active_recipes}")
         print(f"[*] Output directory: {config.output_dir}")
 
         total_candidates_processed = 0
 
-        if max_workers <= 1:
-            for seed in seed_records:
-                try:
-                    cands = process_seed_and_generate(
-                        seed_record=seed,
-                        active_recipes=active_recipes,
-                        generator=generator,
-                        quality_judge=quality_judge,
-                        offense_panel=offense_panel,
-                        storage=storage,
-                        lineage_tracker=lineage_tracker
-                    )
-                    total_candidates_processed += len(cands)
-                except AuthenticationError as e:
-                    print(f"[FATAL AUTH ERROR]: {e}", file=sys.stderr)
+        # Helper to yield seeds in bounded chunks without loading full file into memory
+        def chunk_streamer(stream, size, max_items):
+            c = []
+            count = 0
+            for item in stream:
+                c.append(item)
+                count += 1
+                if len(c) >= size:
+                    yield c
+                    c = []
+                if max_items and count >= max_items:
                     break
-                except BudgetExceededError as e:
-                    print(f"[*] Budget reached: {e}")
-                    break
-                except Exception as e:
-                    print(f"[ERROR on seed {seed.get('id')}]: {e}", file=sys.stderr)
-        else:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(
-                        process_seed_and_generate,
-                        seed_record=seed,
-                        active_recipes=active_recipes,
-                        generator=generator,
-                        quality_judge=quality_judge,
-                        offense_panel=offense_panel,
-                        storage=storage,
-                        lineage_tracker=lineage_tracker
-                    ): seed for seed in seed_records
-                }
+            if c:
+                yield c
 
-                for future in as_completed(futures):
-                    seed = futures[future]
+        raw_seeds = stream_input_records(input_file)
+        chunks = chunk_streamer(raw_seeds, chunk_size, limit)
+
+        for chunk_idx, seed_chunk in enumerate(chunks, start=1):
+            if effective_workers <= 1:
+                for seed in seed_chunk:
                     try:
-                        cands = future.result()
+                        cands = process_seed_and_generate(
+                            seed_record=seed,
+                            active_recipes=active_recipes,
+                            generator=generator,
+                            quality_judge=quality_judge,
+                            offense_panel=offense_panel,
+                            storage=storage,
+                            lineage_tracker=lineage_tracker,
+                            completed_keys=completed_keys
+                        )
                         total_candidates_processed += len(cands)
                     except AuthenticationError as e:
                         print(f"[FATAL AUTH ERROR]: {e}", file=sys.stderr)
-                        executor.shutdown(wait=False, cancel_futures=True)
                         break
                     except BudgetExceededError as e:
                         print(f"[*] Budget reached: {e}")
-                        executor.shutdown(wait=False, cancel_futures=True)
                         break
                     except Exception as e:
                         print(f"[ERROR on seed {seed.get('id')}]: {e}", file=sys.stderr)
+            else:
+                with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+                    futures = {
+                        executor.submit(
+                            process_seed_and_generate,
+                            seed_record=seed,
+                            active_recipes=active_recipes,
+                            generator=generator,
+                            quality_judge=quality_judge,
+                            offense_panel=offense_panel,
+                            storage=storage,
+                            lineage_tracker=lineage_tracker,
+                            completed_keys=completed_keys
+                        ): seed for seed in seed_chunk
+                    }
+
+                    for future in as_completed(futures):
+                        seed = futures[future]
+                        try:
+                            cands = future.result()
+                            total_candidates_processed += len(cands)
+                        except AuthenticationError as e:
+                            print(f"[FATAL AUTH ERROR]: {e}", file=sys.stderr)
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            break
+                        except BudgetExceededError as e:
+                            print(f"[*] Budget reached: {e}")
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            break
+                        except Exception as e:
+                            print(f"[ERROR on seed {seed.get('id')}]: {e}", file=sys.stderr)
 
         lineage_report = lineage_tracker.get_leakage_report()
         exported_files = export_white_generation_outputs(
@@ -422,7 +447,9 @@ def main():
     run_parser.add_argument("--resume", action="store_true", help="Resume from existing checkpoint")
     run_parser.add_argument("--limit", type=int, help="Limit number of seed rows")
     run_parser.add_argument("--recipes", help="Comma-separated active recipes")
-    run_parser.add_argument("--workers", type=int, help="Concurrency workers")
+    run_parser.add_argument("--workers", type=int, help="Concurrency workers limit")
+    run_parser.add_argument("--concurrency", "-c", type=int, help="Concurrency workers limit (alias for --workers)")
+    run_parser.add_argument("--batch-size", "-b", type=int, help="Batch chunk size for processing")
 
     # Subcommand: review-ingest
     ingest_parser = subparsers.add_parser("review-ingest", help="Ingest reviewed Excel spreadsheet")
@@ -437,6 +464,12 @@ def main():
     args = parser.parse_args()
 
     if args.command == "run":
+        concurrency = args.concurrency if args.concurrency is not None else args.workers
+        if concurrency is not None and concurrency <= 0:
+            parser.error("--concurrency / --workers must be a positive integer.")
+        if args.batch_size is not None and args.batch_size <= 0:
+            parser.error("--batch-size must be a positive integer.")
+
         recipes_list = [r.strip() for r in args.recipes.split(",") if r.strip()] if args.recipes else None
         run_white_pipeline(
             input_file=args.input,
@@ -445,7 +478,8 @@ def main():
             resume=args.resume,
             limit=args.limit,
             recipes_filter=recipes_list,
-            workers=args.workers
+            workers=concurrency,
+            batch_size=args.batch_size
         )
     elif args.command == "review-ingest":
         db_path = os.path.join(args.output_dir, "white_generation_state.db")

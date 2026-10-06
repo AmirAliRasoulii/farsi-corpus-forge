@@ -66,9 +66,17 @@ class PersianizationStorage:
                 human_edited_text TEXT,
                 human_notes TEXT,
                 reviewer_name TEXT,
+                fingerprint TEXT,
                 updated_at_utc TEXT NOT NULL
             );
             """)
+
+            # Non-destructive schema migration for existing databases
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(records);")
+            cols = {row["name"] for row in cursor.fetchall()}
+            if "fingerprint" not in cols:
+                conn.execute("ALTER TABLE records ADD COLUMN fingerprint TEXT;")
 
             conn.execute("""
             CREATE TABLE IF NOT EXISTS attempts (
@@ -126,6 +134,22 @@ class PersianizationStorage:
         cursor.execute("SELECT id FROM records;")
         return {row["id"] for row in cursor.fetchall()}
 
+    def get_completed_records_map(self) -> Dict[str, Dict[str, Any]]:
+        """Returns map of record_id -> metadata for intelligent resume verification."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, raw_text, raw_context, fingerprint, human_decision, input_order_idx FROM records;")
+        return {
+            row["id"]: {
+                "fingerprint": row["fingerprint"],
+                "raw_text": row["raw_text"],
+                "raw_context": row["raw_context"],
+                "human_decision": row["human_decision"],
+                "input_order_idx": row["input_order_idx"]
+            }
+            for row in cursor.fetchall()
+        }
+
     def save_record(self, record_data: Dict[str, Any]) -> None:
         """Upserts a record into the database checkpoint."""
         conn = self._get_connection()
@@ -160,7 +184,7 @@ class PersianizationStorage:
                 second_judge_sampling_type, disagreement_flag,
                 source, source_label, parent_id, group_id, split,
                 metadata_json, human_decision, human_edited_text, human_notes, reviewer_name,
-                updated_at_utc
+                fingerprint, updated_at_utc
             ) VALUES (
                 :id, :input_order_idx, :request_id, :raw_text, :raw_context, :original_language, :origin,
                 :translation_status, :quality_status, :offense_label, :annotation_status,
@@ -170,7 +194,7 @@ class PersianizationStorage:
                 :second_judge_sampling_type, :disagreement_flag,
                 :source, :source_label, :parent_id, :group_id, :split,
                 :metadata_json, :human_decision, :human_edited_text, :human_notes, :reviewer_name,
-                :updated_at_utc
+                :fingerprint, :updated_at_utc
             ) ON CONFLICT(id) DO UPDATE SET
                 origin=excluded.origin,
                 translation_status=excluded.translation_status,
@@ -190,10 +214,11 @@ class PersianizationStorage:
                 second_judge_reason=excluded.second_judge_reason,
                 second_judge_sampling_type=excluded.second_judge_sampling_type,
                 disagreement_flag=excluded.disagreement_flag,
-                human_decision=excluded.human_decision,
-                human_edited_text=excluded.human_edited_text,
-                human_notes=excluded.human_notes,
-                reviewer_name=excluded.reviewer_name,
+                human_decision=COALESCE(excluded.human_decision, records.human_decision),
+                human_edited_text=COALESCE(excluded.human_edited_text, records.human_edited_text),
+                human_notes=COALESCE(excluded.human_notes, records.human_notes),
+                reviewer_name=COALESCE(excluded.reviewer_name, records.reviewer_name),
+                fingerprint=excluded.fingerprint,
                 updated_at_utc=excluded.updated_at_utc;
             """, {
                 "id": record_data["id"],
@@ -230,6 +255,7 @@ class PersianizationStorage:
                 "human_edited_text": record_data.get("human_edited_text"),
                 "human_notes": record_data.get("human_notes"),
                 "reviewer_name": record_data.get("reviewer_name"),
+                "fingerprint": record_data.get("fingerprint"),
                 "updated_at_utc": now
             })
 

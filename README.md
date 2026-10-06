@@ -127,7 +127,7 @@ pip install pytest openpyxl
 
 ## ۴. اجرای آزمون‌ها و دموی آفلاین
 
-### اجرای ۴۱ آزمون خودکار:
+### اجرای ۵۵ آزمون خودکار:
 ```bash
 pytest -v
 ```
@@ -140,23 +140,9 @@ python -m mock_demo.run_mock_demo
 
 ---
 
-## ۵. راهنمای اجرای خط لوله فارسی‌سازی (`persianization`)
+## ۵. راهنمای اجرای خط لوله‌ها (`persianization` و `white_generation`)
 
-### ۱. تنظیم متغیرهای محیطی:
-```bash
-cp persianization/.env.example .env
-```
-مقادیر مدل‌ها، نرخ درخواست و سقف بودجه را در `.env` پیکربندی نمایید:
-- `TRANSLATOR_PRIMARY_MODEL`: مدل اصلی ترجمه (مثلاً `gpt-4o-mini`)
-- `TRANSLATOR_FALLBACK_MODELS`: مدل‌های جایگزین به ترتیب اولویت (مثلاً `claude-haiku-4-5,gemini-2.5-flash`)
-- `QUALITY_MODEL_1`: داور کیفیت اول (مثلاً `deepseek-chat`)
-- `QUALITY_MODEL_2`: داور کیفیت دوم نابینا (مثلاً `command-r-plus`)
-- `INPUT_BATCH_SIZE`: اندازه هر بچ جریانی (مثلاً `50`)
-- `MAX_CONCURRENT_REQUESTS`: سقف درخواست همزمان (مثلاً `4`)
-- `REQUESTS_PER_MINUTE`: محدودیت RPM مشترک (مثلاً `60`)
-- `MAX_API_CALLS`: سقف کل فراخوانی‌های مجاز در یک اجرا
-
-### ۲. اجرای خط لوله:
+### ۱. اجرای خط لوله فارسی‌سازی (`persianization`):
 ```bash
 python -m persianization.cli run \
   --input examples/sample_persianization_input.csv \
@@ -165,8 +151,8 @@ python -m persianization.cli run \
   --concurrency 4
 ```
 
-### ۳. ادامه اجرای متوقف‌شده (Resume):
-در صورت بروز وقفه، با پرچم `--resume` پردازش از آخرین رکورد ثبت‌شده در SQLite بدون تکرار کارهای موفق ادامه می‌یابد:
+### ۲. ادامه اجرای متوقف‌شده (Resume):
+در صورت بروز وقفه، با پرچم `--resume` پردازش از آخرین رکورد ثبت‌شده در SQLite بدون تکرار کارهای موفق ادامه می‌یابد (بر اساس اثرانگشت محتوا و تنظیمات):
 ```bash
 python -m persianization.cli run \
   --input examples/sample_persianization_input.csv \
@@ -174,13 +160,22 @@ python -m persianization.cli run \
   --resume
 ```
 
-### ۴. بازبینی انسانی از اکسل (HITL):
+### ۳. بازبینی انسانی از اکسل (HITL):
 فایل `outputs/persianization/review.xlsx` را ویرایش کرده و دستور زیر را اجرا کنید:
 ```bash
 python -m persianization.cli review-ingest \
   --excel-file outputs/persianization/review.xlsx \
   --output-dir outputs/persianization \
   --reviewer "نام_ارزیاب"
+```
+
+### ۴. اجرای خط لوله تولید داده سالم (`white_generation`):
+```bash
+python -m white_generation.cli run \
+  --input examples/persian_white_seeds.jsonl \
+  --output-dir outputs/white_generation \
+  --batch-size 10 \
+  --concurrency 4
 ```
 
 ---

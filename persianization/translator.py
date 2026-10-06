@@ -6,7 +6,10 @@ Includes cache invalidation upon prompt/policy change and standalone context tra
 import re
 import hashlib
 from typing import Dict, Any, List, Optional, Tuple
-from shared.api_client import AvalAIClient, ModelRefusalError, extract_json_from_completion
+from shared.api_client import AvalAIClient, ModelRefusalError, extract_json_from_completion, AuthenticationError
+from shared.rate_limiter import BudgetExceededError
+from shared.circuit_breaker import CircuitBreakerTripped
+from shared.schema_validator import validate_translator_output, SchemaValidationError
 from persianization.storage import PersianizationStorage
 from persianization.config import PersianizationConfig
 
@@ -107,11 +110,23 @@ class TranslationEngine:
                 parsed = res.get("parsed_json")
                 raw_comp = res.get("raw_completion", "")
 
-                status_eval, error_msg = self._evaluate_translation_response(
-                    raw_text=raw_text,
-                    parsed=parsed,
-                    raw_completion=raw_comp
-                )
+                # Validate strict schema first
+                try:
+                    valid_parsed = validate_translator_output(parsed, raw_comp)
+                    status_eval, error_msg = self._evaluate_translation_response(
+                        raw_text=raw_text,
+                        parsed=valid_parsed,
+                        raw_completion=raw_comp
+                    )
+                    clean_text_fa = valid_parsed.get("text_fa")
+                    clean_ctx_fa = valid_parsed.get("context_fa")
+                    clean_reason = valid_parsed.get("reason", "")
+                except SchemaValidationError as sve:
+                    status_eval = "schema_error"
+                    error_msg = str(sve)
+                    clean_text_fa = None
+                    clean_ctx_fa = None
+                    clean_reason = f"Schema validation error: {sve}"
 
                 self.storage.record_attempt(
                     record_id=record_id,
@@ -126,12 +141,12 @@ class TranslationEngine:
                     error_message=error_msg
                 )
 
-                if status_eval in ("translated", "uncertain"):
+                if status_eval in ("translated", "uncertain") and clean_text_fa:
                     result_data = {
                         "translation_status": status_eval,
-                        "text_fa": parsed.get("text_fa"),
-                        "context_fa": parsed.get("context_fa"),
-                        "reason": parsed.get("reason", ""),
+                        "text_fa": clean_text_fa,
+                        "context_fa": clean_ctx_fa,
+                        "reason": clean_reason,
                         "selected_model": model,
                         "model_idx": current_model_idx,
                         "used_fallback": (current_model_idx > 0),
@@ -144,6 +159,9 @@ class TranslationEngine:
                     last_error = error_msg or f"Model '{model}' returned status '{status_eval}'"
                     continue
 
+            except (AuthenticationError, BudgetExceededError, CircuitBreakerTripped):
+                # Critical control exceptions must never be swallowed or continue to next fallback!
+                raise
             except Exception as e:
                 last_error = str(e)
                 self.storage.record_attempt(
@@ -159,6 +177,7 @@ class TranslationEngine:
                     error_message=str(e)
                 )
                 continue
+
 
         # All fallback models exhausted
         return {
